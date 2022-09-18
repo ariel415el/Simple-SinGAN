@@ -52,11 +52,13 @@ class Generator(nn.Module):
 
         N = opt.nfc
         self.head = ConvBlock(3, N, ker_size, padd_size, 1)
+
         self.body = nn.Sequential()
         for i in range(opt.num_model_blocks - 2):
             N = int(opt.nfc / pow(2, (i + 1)))
             block = ConvBlock(max(2 * N, opt.nfc), max(N, opt.nfc), ker_size, padd_size, 1)
             self.body.add_module('block%d' % (i + 1), block)
+
         self.tail = nn.Sequential(
             nn.Conv2d(max(N, opt.nfc), 3, kernel_size=ker_size, stride=1, padding=padd_size),
             nn.Tanh()
@@ -89,15 +91,24 @@ class ArrayOFGenerators:
         self.shapes.append(shape)
         self.noise_amps.append(noise_amp)
 
-    def draw(self, zs=None):
+    def sample_zs(self, n_samples):
+        """Sample spacial noise in the correct shapes for the trained generators and with the right amplitudes"""
+        device = next(self.Gs[0].parameters()).device
+        zs = []
+        for shape, amp in zip(self.shapes, self.noise_amps):
+            zs += [torch.randn(n_samples, 3, shape[0], shape[1], device=device) * amp]
+        return zs
+
+    def sample_images(self, zs=None):
+        """
+        Gradualy synthesize an image by running the generators on the supplied spacial latents.
+         If zs are not supplied they are sampled.
+         """
         if not self.Gs:
             return 0
 
         if zs is None:
-            device = next(self.Gs[0].parameters()).device
-            zs = []
-            for shape, amp in zip(self.shapes, self.noise_amps):
-                zs += [torch.randn(1, 3, shape[0], shape[1], device=device) * amp]
+            zs = self.sample_zs(1)
 
         output = 0
         for i, (z, G) in enumerate(zip(zs, self.Gs)):
