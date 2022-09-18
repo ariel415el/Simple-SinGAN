@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from torchvision.transforms import Resize
+
 
 def weights_init(m):
     classname = m.__class__.__name__
@@ -26,7 +28,7 @@ class WDiscriminator(nn.Module):
         N = int(opt.nfc)
         self.head = ConvBlock(3, N, ker_size, padd_size, 1)
         self.body = nn.Sequential()
-        for i in range(opt.num_layer - 2):
+        for i in range(opt.num_model_blocks - 2):
             N = int(opt.nfc / pow(2, (i + 1)))
             block = ConvBlock(max(2 * N, opt.nfc), max(N, opt.nfc), ker_size, padd_size, 1)
             self.body.add_module('block%d' % (i + 1), block)
@@ -39,19 +41,19 @@ class WDiscriminator(nn.Module):
         return x
 
 
-class GeneratorConcatSkip2CleanAdd(nn.Module):
+class Generator(nn.Module):
     def __init__(self, opt):
-        super(GeneratorConcatSkip2CleanAdd, self).__init__()
+        super(Generator, self).__init__()
         self.is_cuda = torch.cuda.is_available()
         ker_size = 3
         # padd_size = 1
         padd_size = 0
-        self.padding = (ker_size // 2) * opt.num_layer
+        self.padding = (ker_size // 2) * opt.num_model_blocks
 
         N = opt.nfc
         self.head = ConvBlock(3, N, ker_size, padd_size, 1)
         self.body = nn.Sequential()
-        for i in range(opt.num_layer - 2):
+        for i in range(opt.num_model_blocks - 2):
             N = int(opt.nfc / pow(2, (i + 1)))
             block = ConvBlock(max(2 * N, opt.nfc), max(N, opt.nfc), ker_size, padd_size, 1)
             self.body.add_module('block%d' % (i + 1), block)
@@ -68,3 +70,41 @@ class GeneratorConcatSkip2CleanAdd(nn.Module):
         x = self.tail(x)
 
         return x
+
+
+def reset_grads(model, require_grad):
+    for p in model.parameters():
+        p.requires_grad_(require_grad)
+    return model
+
+
+class ArrayOFGenerators:
+    def __init__(self):
+        self.Gs = []
+        self.shapes = []
+        self.noise_amps = []
+
+    def append(self, netG, shape, noise_amp):
+        self.Gs.append(netG)
+        self.shapes.append(shape)
+        self.noise_amps.append(noise_amp)
+
+    def draw(self, zs=None):
+        if not self.Gs:
+            return 0
+
+        if zs is None:
+            device = next(self.Gs[0].parameters()).device
+            zs = []
+            for shape, amp in zip(self.shapes, self.noise_amps):
+                zs += [torch.randn(1, 3, shape[0], shape[1], device=device) * amp]
+
+        output = 0
+        for i, (z, G) in enumerate(zip(zs, self.Gs)):
+            output = G(z + output) + output
+            if i != len(self.Gs) - 1:
+                output = Resize(zs[i+1].shape[-2:], antialias=True)(output)
+        return output
+
+    def __len__(self):
+        return len(self.Gs)
