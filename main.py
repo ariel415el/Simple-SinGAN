@@ -1,5 +1,4 @@
 import os
-import math
 from copy import deepcopy
 import torch
 from torch import optim, nn
@@ -8,8 +7,10 @@ from torchvision.transforms import Resize
 from tqdm import tqdm
 
 from argparse import Namespace
+
+from diffaug import DiffAugment
 from models import weights_init, Generator, WDiscriminator, reset_grads, ArrayOFGenerators
-from utils import read_image, create_gaussian_pyramid, calc_gradient_penalty
+from utils import calc_gradient_penalty, build_reference_pyramid
 
 
 def get_models(opt):
@@ -21,18 +22,8 @@ def get_models(opt):
     netD.apply(weights_init)
     return netG, netD
 
-def build_reference_pyramid(image_paths, opt):
-    # Define reference image pyramid
-    reference_images = [read_image(image_path).to(device) for image_path in image_paths]
-    reference_images = [Resize(256, antialias=True)(img) for img in reference_images]
-    reference_images = torch.cat(reference_images, dim=0)
-    min_dim = min(reference_images.shape[2], reference_images.shape[3])
-    scale_factor = math.pow(opt.min_size / min_dim, 1 / (opt.num_levels - 1))
-    reference_pyramid = create_gaussian_pyramid(reference_images, scale_factor, opt.num_levels)
-    return reference_pyramid
-
 def main(image_paths, opt):
-    reference_pyramid = build_reference_pyramid(image_paths, opt)
+    reference_pyramid = build_reference_pyramid(image_paths, opt.resize, opt.coarse_dim, opt.num_levels, device)
 
     fixed_zs = []
     multi_scale_generator = ArrayOFGenerators()
@@ -58,9 +49,9 @@ def main(image_paths, opt):
 
 def train_single_scale(multi_scale_generator, netG, netD, reference_pyr, fixed_previous_zs, opt):
     lvl = len(multi_scale_generator)
-    ref_img = reference_pyr[lvl].to(device)
-    batch_size = len(ref_img)
-    cur_h, cur_w = ref_img.shape[-2:]
+    reference_image = reference_pyr[lvl].to(device)
+    batch_size = len(reference_image)
+    cur_h, cur_w = reference_image.shape[-2:]
 
     optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(0.5, 0.9))
     optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(0.5, 0.9))
@@ -78,33 +69,31 @@ def train_single_scale(multi_scale_generator, netG, netD, reference_pyr, fixed_p
 
     cur_lvl_fixed_z = torch.randn(batch_size, 3, cur_h, cur_w, device=device) * noise_amp
 
-    print(f"Lvl- {lvl}: shape: {(cur_h, cur_w)}. noise_amp: {noise_amp}")
+    print(f"Lvl- {lvl}: shape: {(cur_h, cur_w)}. noise_amp: {noise_amp:.3f}")
     for iter in tqdm(range(opt.niter)):
-        ############################
-        # (1) Update D network: maximize D(ref_img) - D(G(z))
-        ###########################
-        # train with real
-        netD.zero_grad()
-        errD_real = -netD(ref_img).mean()
-
         # Draw input for this level generator from previous scales
         previous_image = 0
         if lvl > 0:
             previous_zs = multi_scale_generator.sample_zs(batch_size)
             previous_image = multi_scale_generator.sample_images(previous_zs)
             previous_image = Resize((cur_h, cur_w), antialias=True)(previous_image)
-
-        # train with fake
         noise = torch.randn(batch_size, 3, cur_h, cur_w, device=device) * noise_amp
         fake = netG(previous_image + noise) + previous_image
 
+        ref_img = reference_image.clone()
+        if opt.augment:
+            ref_img = DiffAugment(ref_img, prob=iter/opt.niter, policy=opt.augment)
+            fake = DiffAugment(fake, prob=iter/opt.niter, policy=opt.augment)
+
+        # Compute losses
+        netD.zero_grad()
+        errD_real = -netD(ref_img).mean()
         errD_fake = netD(fake.detach()).mean()
-
         gradient_penalty = calc_gradient_penalty(netD, ref_img, fake, device)
-
         errD_total = errD_real + errD_fake + opt.gp_weight * gradient_penalty
-        errD_total.backward()
 
+        # Train D
+        errD_total.backward()
         optimizerD.step()
         schedulerD.step()
 
@@ -121,7 +110,7 @@ def train_single_scale(multi_scale_generator, netG, netD, reference_pyr, fixed_p
             fixed_previous_image = Resize((cur_h, cur_w), antialias=True)(fixed_previous_image)
 
         reconstruction = netG(fixed_previous_image + cur_lvl_fixed_z) + fixed_previous_image
-        rec_loss = rec_criteria(reconstruction, ref_img)
+        rec_loss = rec_criteria(reconstruction, reference_image)
 
         errG_total = errG + cfg.rec_weight * rec_loss
         errG_total.backward()
@@ -143,19 +132,32 @@ if __name__ == '__main__':
     device = torch.device("cuda:0")
 
     cfg = Namespace()
-    cfg.num_levels = 8              # Number of scales in the image pyramid
-    cfg.min_size = 25               # Dimentsion of the coarsest level in the pyramid
-    cfg.nfc = 32                    # number of convolution channels in each block
-    cfg.num_model_blocks = 5        # How many convolution blocks in each Generator / Discriminator
-    cfg.niter = 4000                # Number of gradient steps at each level
-    cfg.lr = 0.0005                 # Adam learning rate
-    cfg.base_noise_amp = 0.1        # noise amplitude for levels > 0 are multiplied by this factor
-    cfg.gp_weight = 0.1             # Gradient penalty weight in total loss
-    cfg.rec_weight = 10             # L2 reconstruction weight in total loss
-    cfg.models_reset_freq = 4       # How frequently (scales) to reset the generator & critic weights.
-    cfg.gamma = 0.1                 # LR schedule gamma parameter
+    cfg.resize = None               # Resize images to this size
+    cfg.num_levels = 8                # Number of scales in the image pyramid
+    cfg.coarse_dim = 25                 # Dimentsion of the coarsest level in the pyramid
+    cfg.nfc = 32                      # number of convolution channels in each block
+    cfg.num_model_blocks = 6          # How many convolution blocks in each Generator / Discriminator
+    cfg.niter = 4000                  # Number of gradient steps at each level
+    cfg.lr = 0.0005                   # Adam learning rate
+    cfg.base_noise_amp = 0.1          # noise amplitude for levels > 0 are multiplied by this factor
+    cfg.gp_weight = 0.1               # Gradient penalty weight in total loss
+    cfg.rec_weight = 10               # L2 reconstruction weight in total loss
+    cfg.models_reset_freq = 100         # How frequently (scales) to reset the generator & critic weights.
+    cfg.gamma = 0.1                   # LR schedule gamma parameter
+    cfg.augment = 'color,translation' # Data augmentation
+
 
     output_dir = f"Outputs"
     os.makedirs(output_dir, exist_ok=True)
-    main(['Images/balloons.png',
+    main([
+        "Images/balloons.png"
+          # '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/1.jpg',
+    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/2.jpg',
+    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/3.jpg',
+    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/4.jpg',
+    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/5.jpg',
+    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/6.jpg',
+          # '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/7.jpg',
+          # '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/8.jpg',
+          # '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/9.jpg',
           ], cfg)

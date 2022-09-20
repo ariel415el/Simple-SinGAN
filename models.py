@@ -32,6 +32,7 @@ class WDiscriminator(nn.Module):
             N = int(opt.nfc / pow(2, (i + 1)))
             block = ConvBlock(max(2 * N, opt.nfc), max(N, opt.nfc), ker_size, padd_size, 1)
             self.body.add_module('block%d' % (i + 1), block)
+            # self.body.add_module('MP%d' % (i + 1), torch.nn.MaxPool2d(2))
         self.tail = nn.Conv2d(max(N, opt.nfc), 1, kernel_size=ker_size, stride=1, padding=padd_size)
 
     def forward(self, x):
@@ -119,3 +120,16 @@ class ArrayOFGenerators:
 
     def __len__(self):
         return len(self.Gs)
+
+
+if __name__ == '__main__':
+    from argparse import Namespace
+    opt = Namespace()
+    opt.nfc = 32
+    opt.num_model_blocks = 5
+
+    D = WDiscriminator(opt)
+    x = torch.ones(1,3,40,40)
+
+    print(D)
+    print(D(x).shape)
