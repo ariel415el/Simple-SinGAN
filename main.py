@@ -9,8 +9,9 @@ from tqdm import tqdm
 from argparse import Namespace
 
 from diffaug import DiffAugment
+from main_SWD import PatchSWDLoss
 from models import weights_init, Generator, WDiscriminator, reset_grads, ArrayOFGenerators
-from utils import calc_gradient_penalty, build_reference_pyramid
+from utils import calc_gradient_penalty, build_reference_pyramid, plot_losses
 
 
 def get_models(opt):
@@ -22,9 +23,11 @@ def get_models(opt):
     netD.apply(weights_init)
     return netG, netD
 
+
 def main(image_paths, opt):
     reference_pyramid = build_reference_pyramid(image_paths, opt.resize, opt.coarse_dim, opt.num_levels, device)
 
+    swd_losses = []
     fixed_zs = []
     multi_scale_generator = ArrayOFGenerators()
     for lvl in range(opt.num_levels):
@@ -34,7 +37,7 @@ def main(image_paths, opt):
 
         save_image(reference_pyramid[lvl], f"{output_dir}/Reference_lvl-{lvl}.png", normalize=True)
 
-        netG, shape, noise_amp, cur_lvl_fixed_z = train_single_scale(multi_scale_generator, netG, netD, reference_pyramid, fixed_zs, opt)
+        netG, shape, noise_amp, cur_lvl_fixed_z, losses = train_single_scale(multi_scale_generator, netG, netD, reference_pyramid, fixed_zs, opt)
         fixed_zs.append(cur_lvl_fixed_z)
 
         # Freeze model before adding it into the array of previous models
@@ -45,6 +48,8 @@ def main(image_paths, opt):
         # Dump samples
         images = multi_scale_generator.sample_images(multi_scale_generator.sample_zs(16))
         save_image(images.clip(-1, 1), os.path.join(output_dir, f"Val-Samples-{lvl}.png"), normalize=True, nrow=4)
+        swd_losses += losses
+        plot_losses(swd_losses)
 
 
 def train_single_scale(multi_scale_generator, netG, netD, reference_pyr, fixed_previous_zs, opt):
@@ -70,6 +75,7 @@ def train_single_scale(multi_scale_generator, netG, netD, reference_pyr, fixed_p
     cur_lvl_fixed_z = torch.randn(batch_size, 3, cur_h, cur_w, device=device) * noise_amp
 
     print(f"Lvl- {lvl}: shape: {(cur_h, cur_w)}. noise_amp: {noise_amp:.3f}")
+    losses = []
     for iter in tqdm(range(opt.niter)):
         # Draw input for this level generator from previous scales
         previous_image = 0
@@ -85,14 +91,15 @@ def train_single_scale(multi_scale_generator, netG, netD, reference_pyr, fixed_p
             ref_img = DiffAugment(ref_img, prob=iter/opt.niter, policy=opt.augment)
             fake = DiffAugment(fake, prob=iter/opt.niter, policy=opt.augment)
 
-        # Compute losses
+        ############################
+        # (1) Update D network: maximize D(G(z))
+        #########################
         netD.zero_grad()
         errD_real = -netD(ref_img).mean()
         errD_fake = netD(fake.detach()).mean()
         gradient_penalty = calc_gradient_penalty(netD, ref_img, fake, device)
         errD_total = errD_real + errD_fake + opt.gp_weight * gradient_penalty
 
-        # Train D
         errD_total.backward()
         optimizerD.step()
         schedulerD.step()
@@ -118,14 +125,17 @@ def train_single_scale(multi_scale_generator, netG, netD, reference_pyr, fixed_p
         optimizerG.step()
         schedulerG.step()
 
-        ############################
-        # (3) Log Results
+        with torch.no_grad():
+            losses.append(debug_criteria(ref_img, fake).item())
+
         ###########################
+        # (3) Log Results
+        ############################
         if iter % 1000 == 0 or iter+1 == opt.niter:
             save_image(fake.clip(-1,1), os.path.join(output_dir, f"Train-samples_lvl-{lvl}-iter-{iter}.png"), normalize=True)
             save_image(reconstruction.clip(-1, 1), os.path.join(output_dir, f"Train-reconstruction_lvl-{lvl}-iter-{iter}.png"), normalize=True)
 
-    return netG, (cur_h, cur_w), noise_amp, cur_lvl_fixed_z
+    return netG, (cur_h, cur_w), noise_amp, cur_lvl_fixed_z, losses
 
 
 if __name__ == '__main__':
@@ -144,20 +154,10 @@ if __name__ == '__main__':
     cfg.rec_weight = 10               # L2 reconstruction weight in total loss
     cfg.models_reset_freq = 100         # How frequently (scales) to reset the generator & critic weights.
     cfg.gamma = 0.1                   # LR schedule gamma parameter
-    cfg.augment = 'color,translation' # Data augmentation
+    cfg.augment = '' # Data augmentation
 
+    debug_criteria = PatchSWDLoss(patch_size=7, num_proj=64)
 
     output_dir = f"Outputs"
     os.makedirs(output_dir, exist_ok=True)
-    main([
-        "Images/balloons.png"
-          # '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/1.jpg',
-    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/2.jpg',
-    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/3.jpg',
-    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/4.jpg',
-    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/5.jpg',
-    #       '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/6.jpg',
-          # '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/7.jpg',
-          # '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/8.jpg',
-          # '/mnt/storage_ssd/datasets/few-shot-images/pokemon/img/9.jpg',
-          ], cfg)
+    main(["Images/balloons.png"], cfg)
