@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from argparse import Namespace
 
-from utils import build_reference_pyramid
+from utils import build_reference_pyramid, plot_losses
 from models import weights_init, Generator, reset_grads, ArrayOFGenerators
 
 
@@ -75,8 +75,8 @@ def main(image_paths, opt):
         images = multi_scale_generator.sample_images(multi_scale_generator.sample_zs(16))
         save_image(images.clip(-1, 1), os.path.join(output_dir, f"Val-Samples-{lvl}.png"), normalize=True, nrow=nrow)
         all_losses += lvl_losses
-        plt.plot(range(len(all_losses)), all_losses)
-        plt.savefig(os.path.join(output_dir, "Losses.png"))
+        plot_losses(all_losses, os.path.join(output_dir, "Losses.png"))
+
 
 def train_single_scale(multi_scale_generator, netG, reference_pyr, prev_fixed_zs, opt):
     lvl = len(multi_scale_generator)

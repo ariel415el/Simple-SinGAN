@@ -1,13 +1,9 @@
 import math
-import os
 
 import torch
 from matplotlib import pyplot as plt
 from skimage import io
 from torchvision.transforms import Resize
-
-from main import output_dir
-
 
 def create_gaussian_pyramid(img, scale_factor, num_levels):
     reals = []
@@ -62,10 +58,10 @@ def build_reference_pyramid(image_paths, resize, coarse_dim, num_levels, device)
     return reference_pyramid
 
 
-def plot_losses(losses):
+def plot_losses(losses, outpath):
     import numpy as np
     means = [np.mean(losses[i-10:i+10]) for i in range(len(losses))]
     # stds = [np.std(losses[i-10:i+10]) for i in range(len(losses))]
     plt.plot(range(len(means)), means, c='c', alpha=0.5)
     plt.plot(range(len(losses)), losses, c='b', alpha=0.5)
-    plt.savefig(os.path.join(output_dir, "Losses.png"))
+    plt.savefig(outpath)

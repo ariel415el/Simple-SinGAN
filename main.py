@@ -49,7 +49,7 @@ def main(image_paths, opt):
         images = multi_scale_generator.sample_images(multi_scale_generator.sample_zs(16))
         save_image(images.clip(-1, 1), os.path.join(output_dir, f"Val-Samples-{lvl}.png"), normalize=True, nrow=4)
         swd_losses += losses
-        plot_losses(swd_losses)
+        plot_losses(swd_losses, os.path.join(output_dir, "Losses.png"))
 
 
 def train_single_scale(multi_scale_generator, netG, netD, reference_pyr, fixed_previous_zs, opt):
